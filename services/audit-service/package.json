@@ -1,0 +1,12 @@
+{
+  "name": "@zt/audit-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@zt/common": "*",
+    "express": "^5.1.0",
+    "zod": "^4.6.6",
+    "cassandra-driver": "^4.8.0"
+  }
+}

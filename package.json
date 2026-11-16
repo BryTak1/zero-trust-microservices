@@ -1,0 +1,25 @@
+{
+  "name": "zero-trust-microservices",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "demo": "tsx scripts/demo.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "otplib": "^12.0.1",
+    "typescript": "^5.6.0",
+    "vitest": "^5.1.0"
+  }
+}

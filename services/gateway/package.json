@@ -1,0 +1,12 @@
+{
+  "name": "@zt/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@zt/common": "*",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.0.0",
+    "zod": "^4.6.6"
+  }
+}
