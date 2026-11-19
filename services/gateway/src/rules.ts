@@ -1,7 +1,16 @@
 import type { Role } from "@zt/common";
 import type { AccessRequest, Rule } from "./policy";
 
+export const LOCKOUT_THRESHOLD = 5;
+export const LOCKOUT_WINDOW_MS = 60_000;
+
 export const defaultRules: readonly Rule[] = [
+  // Denials during a lockout also count, so the lockout lasts as long as the probing does.
+  {
+    name: "suspicious-activity-lockout",
+    effect: "deny",
+    matches: (request) => request.recentDenials >= LOCKOUT_THRESHOLD,
+  },
   {
     name: "service-tokens-blocked-at-edge",
     effect: "deny",

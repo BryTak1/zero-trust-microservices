@@ -7,12 +7,14 @@ import {
   type TokenVerifier,
 } from "@zt/common";
 import type { AuditSink } from "./auditSink";
+import type { DenialTracker } from "./denialTracker";
 import { evaluate, type Rule } from "./policy";
 import { forward, resolveUpstream, type Upstream } from "./proxy";
 
 export type GatewayDeps = {
   readonly verify: TokenVerifier;
   readonly rules: readonly Rule[];
+  readonly denials: DenialTracker;
   readonly audit: AuditSink;
   readonly authUrl: string;
   readonly upstreams: readonly Upstream[];
@@ -54,7 +56,18 @@ const enforcePolicy =
   async (req, res) => {
     const path = req.baseUrl + req.path;
     const principal = await authenticate(deps.verify, req);
-    const decision = evaluate(deps.rules, { principal, method: req.method, path });
+    // Anonymous callers all share one identity, so only known principals are tracked;
+    // the rate limit on login covers anonymous probing.
+    const recentDenials = principal ? deps.denials.count(principal.id) : 0;
+    const decision = evaluate(deps.rules, {
+      principal,
+      method: req.method,
+      path,
+      recentDenials,
+    });
+    if (!decision.allowed && principal) {
+      deps.denials.record(principal.id);
+    }
 
     const audited = await deps
       .audit({

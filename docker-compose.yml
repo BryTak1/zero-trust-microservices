@@ -3,8 +3,21 @@ x-service: &service
   image: zero-trust-services
   restart: unless-stopped
 
+# Micro-segmentation: each network joins only the pair (or trio) of containers that must talk,
+# so a compromised service cannot reach anything it has no business with.
+networks:
+  edge: {}
+  gateway-auth: { internal: true }
+  gateway-resource: { internal: true }
+  gateway-audit: { internal: true }
+  auth-resource: { internal: true }
+  auth-audit: { internal: true }
+  auth-db: { internal: true }
+  resource-db: { internal: true }
+  audit-db: { internal: true }
+
 services:
-  # The gateway is the only container reachable from outside the Compose network.
+  # The gateway is the only container reachable from outside, and it touches no database.
   gateway:
     <<: *service
     environment:
@@ -16,6 +29,7 @@ services:
       GATEWAY_CLIENT_SECRET: ${GATEWAY_CLIENT_SECRET:?Set GATEWAY_CLIENT_SECRET in .env}
     ports:
       - "127.0.0.1:8080:8080"
+    networks: [edge, gateway-auth, gateway-resource, gateway-audit]
     depends_on:
       - auth-service
       - resource-service
@@ -25,10 +39,11 @@ services:
     <<: *service
     environment:
       SERVICE: auth-service
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/auth
+      DATABASE_URL: postgres://auth:${AUTH_DB_PASSWORD:?Set AUTH_DB_PASSWORD in .env}@postgres-auth:5432/auth
       GATEWAY_CLIENT_SECRET: ${GATEWAY_CLIENT_SECRET:?Set GATEWAY_CLIENT_SECRET in .env}
+    networks: [gateway-auth, auth-resource, auth-audit, auth-db]
     depends_on:
-      postgres:
+      postgres-auth:
         condition: service_healthy
 
   resource-service:
@@ -36,9 +51,10 @@ services:
     environment:
       SERVICE: resource-service
       AUTH_URL: http://auth-service:3000
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/resources
+      DATABASE_URL: postgres://resources:${RESOURCE_DB_PASSWORD:?Set RESOURCE_DB_PASSWORD in .env}@postgres-resources:5432/resources
+    networks: [gateway-resource, auth-resource, resource-db]
     depends_on:
-      postgres:
+      postgres-resources:
         condition: service_healthy
 
   audit-service:
@@ -47,19 +63,38 @@ services:
       SERVICE: audit-service
       AUTH_URL: http://auth-service:3000
       CASSANDRA_CONTACT_POINTS: cassandra
+    networks: [gateway-audit, auth-audit, audit-db]
     depends_on:
       cassandra:
         condition: service_healthy
 
-  postgres:
+  # Separate instances with separate logins, so one service's credentials open nothing else.
+  postgres-auth:
     image: postgres:17-alpine
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_USER: auth
+      POSTGRES_DB: auth
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:?Set AUTH_DB_PASSWORD in .env}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres-auth-data:/var/lib/postgresql/data
+    networks: [auth-db]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U auth -d auth"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  postgres-resources:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: resources
+      POSTGRES_DB: resources
+      POSTGRES_PASSWORD: ${RESOURCE_DB_PASSWORD:?Set RESOURCE_DB_PASSWORD in .env}
+    volumes:
+      - postgres-resources-data:/var/lib/postgresql/data
+    networks: [resource-db]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resources -d resources"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -71,6 +106,7 @@ services:
       HEAP_NEWSIZE: 128M
     volumes:
       - cassandra-data:/var/lib/cassandra
+    networks: [audit-db]
     healthcheck:
       test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
       interval: 10s
@@ -79,5 +115,6 @@ services:
       start_period: 60s
 
 volumes:
-  postgres-data:
+  postgres-auth-data:
+  postgres-resources-data:
   cassandra-data:

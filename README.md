@@ -30,13 +30,35 @@ flowchart LR
 | Service | Responsibility | Store |
 |---|---|---|
 | `gateway` | Only public entry point. Verifies the token, evaluates policy, audits the decision, forwards. | none |
-| `auth-service` | Registration, password + TOTP login, issues 5-minute ES256 tokens, publishes JWKS. | Postgres (`auth`) |
-| `resource-service` | Example protected API (`/documents`). Re-verifies the token and role itself. | Postgres (`resources`) |
+| `auth-service` | Registration, password + TOTP login, issues 5-minute ES256 tokens, publishes JWKS. | Postgres (`postgres-auth`) |
+| `resource-service` | Example protected API (`/documents`). Re-verifies the token and role itself. | Postgres (`postgres-resources`) |
 | `audit-service` | Stores every allow/deny decision. Writes need a service token, reads need an admin. | Cassandra |
 
 Postgres holds users and documents because they need uniqueness and consistent reads. Cassandra holds
 audit events because they are write-heavy, never updated, and always read by time range; the table is
 partitioned by day so that query hits one partition.
+
+### Micro-segmentation
+
+Docker networks join only the containers that must talk, and each Postgres instance has its own login.
+Only `edge` can reach the host; every other network is internal.
+
+| Network | Members |
+|---|---|
+| `edge` | gateway (published on `127.0.0.1:8080`) |
+| `gateway-auth`, `gateway-resource`, `gateway-audit` | gateway and that one service |
+| `auth-resource`, `auth-audit` | auth-service and the service that fetches its public key |
+| `auth-db`, `resource-db`, `audit-db` | each service and its own database |
+
+So the gateway reaches no database, and resource-service cannot reach the audit service, Cassandra
+or the auth database.
+
+### Adaptive policy
+
+The gateway counts each user's recent denials. With 5 or more in 60 seconds, the
+`suspicious-activity-lockout` rule denies everything, even requests the user is normally allowed.
+Denials during the lockout also count, so it lasts as long as the probing does. This turns the
+monitoring into an automatic response, and was added as one new rule without changing `evaluate`.
 
 ## Run it
 
@@ -53,12 +75,22 @@ Run the scripted walkthrough (needs Node 22+ and `npm install` on the host):
 npm run demo
 ```
 
-It registers an employee, logs in with a TOTP code, and shows allowed and denied requests.
+It runs 23 checks in seven groups and prints PASS or FAIL for each:
 
-To try the admin path, promote the account the demo printed, then log in again:
+- **Identity:** a wrong one-time code is refused, and the right one issues a token.
+- **Least privilege:** requests with no token, an employee writing or reading the audit trail, and a path traversal attempt are all refused.
+- **Backends do not trust the gateway:** calling `resource-service` directly, with no token or a forged admin token, is refused.
+- **Micro-segmentation:** from inside the containers, resource-service reaches its own database but not the auth database, Cassandra or the audit service, and the gateway reaches no database.
+- **Policy grants rights:** after promotion to admin, the same user can create documents and read the audit trail, and the latest decisions are printed from Cassandra.
+- **Fail closed:** with `audit-service` stopped, requests get 503; once it is back, access returns.
+- **Adaptive policy:** after 5 denied attempts, the user's normal reads are blocked too, and Cassandra records the `suspicious-activity-lockout` rule.
+
+The script briefly stops and restarts `audit-service`, and promotes its test user to admin directly in Postgres.
+
+To use the admin API by hand, promote an account, then log in again:
 
 ```bash
-docker compose exec postgres psql -U postgres -d auth -c "UPDATE users SET role='admin' WHERE email='<email>'"
+docker compose exec postgres-auth psql -U auth -d auth -c "UPDATE users SET role='admin' WHERE email='<email>'"
 ```
 
 An admin can `POST`/`DELETE` `/api/documents` and read `GET /api/audit?day=YYYY-MM-DD`.
@@ -114,12 +146,13 @@ The code is functional (factory functions and plain data, no classes apart from 
 | Repudiation | Every decision (allow and deny) is audited; access is refused if it cannot be recorded. |
 | Information disclosure | Uniform login errors, no secrets or tokens in logs, signing key never leaves memory. |
 | Denial of service | Rate limit on login/register, body size limits, upstream timeouts. |
-| Elevation of privilege | Deny by default, deny overrides allow, registration cannot set a role, services re-check roles. |
+| Elevation of privilege | Deny by default, deny overrides allow, registration cannot set a role, services re-check roles, repeated denials trigger a lockout, and network segmentation limits what a compromised service can reach. |
 
 ### Known limitations
 
 - Traffic inside the Compose network is plain HTTP. Production would add TLS at the gateway and mTLS between services.
-- Both Postgres databases share one superuser, and Cassandra runs without authentication. Neither is reachable from outside the Compose network.
+- Cassandra runs without authentication; only audit-service shares a network with it. Each Postgres login is the superuser of its own instance.
+- Lockout counts live in the gateway's memory, so they reset on restart and would need a shared store, such as Redis, with several gateways.
 - TOTP secrets are stored unencrypted, and a code can be replayed within its 30-second window.
 - There is no enrolment-confirmation step, token revocation, or admin API; roles are changed in SQL.
 - The rate limit is per client IP as seen by the gateway, so it needs `trust proxy` configured behind a load balancer.

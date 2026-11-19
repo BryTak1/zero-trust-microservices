@@ -4,6 +4,8 @@ export type AccessRequest = {
   readonly principal: Principal | undefined;
   readonly method: string;
   readonly path: string;
+  // A behavioural signal: how often this principal was denied recently.
+  readonly recentDenials: number;
 };
 
 // New behaviour is added by writing another Rule; evaluate never needs to change.
