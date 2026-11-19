@@ -11,54 +11,89 @@ const main = async (): Promise<void> => {
   const email = `demo-${randomBytes(4).toString("hex")}@example.com`;
   const password = randomBytes(16).toString("hex");
 
+  // The numbers in these comments match the #numbers the demo prints next to each result.
+
+  // ── Section 1: Identity ──────────────────────────────────────────────
   section("Identity: a password alone is not enough");
+
+  // #1  POST /auth/register  (gateway forwards to auth-service). Expect 201 and an MFA secret.
   const registered = await call("POST", "/auth/register", { body: { email, password } });
   report("Register a new employee", registered, 201);
   const { totpSecret } = registered.body as { totpSecret: string };
+
+  // #2  POST /auth/login with the right password but a wrong one-time code. Expect 401.
   report(
     "Log in with the wrong one-time code",
     await logIn(email, password, wrongCode(totpSecret)),
     401,
   );
+
+  // #3  POST /auth/login with the right password and code. Expect 200 and a 5-minute token.
   const loggedIn = await logIn(email, password, authenticator.generate(totpSecret));
   report("Log in with the right one-time code", loggedIn, 200);
   const token = accessToken(loggedIn);
 
+  // ── Section 2: Least privilege at the gateway ────────────────────────
   section("Least privilege at the gateway");
+
+  // #4  GET /api/documents as an employee. The staff-read-documents rule allows it. Expect 200.
   report("Read documents with a token", await call("GET", "/api/documents", { token }), 200);
+
+  // #5  GET /api/documents with no token. The gateway does not know the caller. Expect 401.
   report("Read documents without a token", await call("GET", "/api/documents"), 401);
+
+  // #6  POST /api/documents as an employee. No rule allows it, so default-deny. Expect 403.
   report(
     "Employee tries to create a document",
     await call("POST", "/api/documents", { token, body: { title: "x", body: "y" } }),
     403,
   );
+
+  // #7  GET /api/audit as an employee. Only admins may read the audit trail. Expect 403.
   report("Employee tries to read the audit trail", await call("GET", "/api/audit", { token }), 403);
+
+  // #8  GET /api/documents/..%2Fhealth. The proxy rejects the unsafe path. Expect 404.
   report(
     "Path traversal attempt",
     await call("GET", "/api/documents/..%2Fhealth", { token }),
     404,
   );
 
+  // ── Section 3: Backends do not trust the gateway ─────────────────────
   section("Backends do not trust the gateway");
+
+  // #9  GET resource-service:3000/documents directly, skipping the gateway, with no token. Expect 401.
   report("Call resource-service directly with no token", direct("/documents"), 401);
+
+  // #10 The same direct call with an admin token signed by the attacker's own key. Expect 401.
   report(
     "Call resource-service directly with a forged admin token",
     direct("/documents", await forgedAdminToken()),
     401,
   );
 
+  // ── Section 4: Micro-segmentation ────────────────────────────────────
   section("Micro-segmentation: each service reaches only what it needs");
+
+  // #11 to #15 are not HTTP requests: each opens a raw TCP connection from inside a container.
   expectReach("resource-service reaches its own database", reach("resource-service", "postgres-resources", 5432), "reachable");
   expectReach("resource-service cannot reach the auth database", reach("resource-service", "postgres-auth", 5432), "unreachable");
   expectReach("resource-service cannot reach Cassandra", reach("resource-service", "cassandra", 9042), "unreachable");
   expectReach("resource-service cannot reach audit-service", reach("resource-service", "audit-service", 3000), "unreachable");
   expectReach("gateway cannot reach any database", reach("gateway", "postgres-auth", 5432), "unreachable");
 
+  // ── Section 5: Extra rights come from policy ─────────────────────────
   section("Extra rights come from policy, not from the network");
+
+  // Setup, not a check: an SQL UPDATE makes this user an admin, standing in for an admin console.
   promoteToAdmin(email);
+
+  // #16 POST /auth/login again. The new token now carries role "admin". Expect 200.
   const adminLogin = await logIn(email, password, authenticator.generate(totpSecret));
   report("Log in again after promotion to admin", adminLogin, 200);
   const adminToken = accessToken(adminLogin);
+
+  // #17 POST /api/documents as an admin. The admins-manage-documents rule allows it. Expect 201.
   report(
     "Admin creates a document",
     await call("POST", "/api/documents", {
@@ -67,11 +102,17 @@ const main = async (): Promise<void> => {
     }),
     201,
   );
+
+  // #18 GET /api/audit as an admin. Expect 200, then print the latest decisions from Cassandra.
   const audit = await call("GET", "/api/audit", { token: adminToken });
   report("Admin reads the audit trail", audit, 200);
   printRecentDecisions(audit.body as readonly AuditEvent[]);
 
+  // ── Section 6: Fail closed ───────────────────────────────────────────
   section("Fail closed: no audit record, no access");
+
+  // #19 Stop audit-service, then GET /api/documents as an admin. The decision can't be
+  // recorded, so the gateway refuses. Expect 503.
   compose("stop", "audit-service");
   try {
     report(
@@ -82,13 +123,18 @@ const main = async (): Promise<void> => {
   } finally {
     compose("start", "audit-service");
   }
+
+  // #20 Restart audit-service and repeat the same GET until it works again. Expect 200.
   report(
     "Read documents once audit-service is back",
     await retryUntil(() => call("GET", "/api/documents", { token: adminToken }), 200),
     200,
   );
 
+  // ── Section 7: Adaptive policy ───────────────────────────────────────
   section("Adaptive policy: repeated denials lock the account");
+
+  // #21 POST /api/documents as the employee 5 times. Each is denied and counted. Expect 403 x5.
   const attempts = await repeat(LOCKOUT_ATTEMPTS, () =>
     call("POST", "/api/documents", { token, body: { title: "x", body: "y" } }),
   );
@@ -97,11 +143,16 @@ const main = async (): Promise<void> => {
     attempts.every((attempt) => attempt.status === 403),
     `HTTP ${attempts.map((attempt) => attempt.status).join(", ")} (expected all 403)`,
   );
+
+  // #22 GET /api/documents as the same employee, the request that worked in #4. Now the
+  // suspicious-activity-lockout rule matches, and a deny beats the allow. Expect 403.
   report(
     "The same employee's normal read is now blocked",
     await call("GET", "/api/documents", { token }),
     403,
   );
+
+  // #23 Not an HTTP request: query Cassandra directly for the newest decision's rule name.
   const rule = latestAuditRule();
   record(
     "The audit trail names the lockout rule",
@@ -122,8 +173,11 @@ const LOCKOUT_ATTEMPTS = 5;
 let checks = 0;
 let failures = 0;
 
+let sections = 0;
+
 const section = (title: string): void => {
-  console.log(`\n${title}`);
+  sections += 1;
+  console.log(`\n${sections}. ${title}`);
 };
 
 const report = (step: string, result: Result, expected: number): void =>
@@ -135,7 +189,7 @@ const expectReach = (step: string, actual: Reach, expected: Reach): void =>
 const record = (step: string, ok: boolean, detail: string): void => {
   checks += 1;
   failures += ok ? 0 : 1;
-  console.log(`  ${ok ? "PASS" : "FAIL"}  ${step}: ${detail}`);
+  console.log(`  ${ok ? "PASS" : "FAIL"}  #${String(checks).padEnd(3)} ${step}: ${detail}`);
 };
 
 const call = async (
