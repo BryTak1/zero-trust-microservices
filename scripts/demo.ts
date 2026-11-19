@@ -206,8 +206,6 @@ const call = async (
       },
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
-  // The slow docker exec checks can outlast the gateway's keep-alive timeout, so a reused
-  // connection may already be closed; one retry on a fresh connection covers that.
   const response = await request().catch((error: unknown) => {
     if (isClosedSocket(error)) {
       return request();
